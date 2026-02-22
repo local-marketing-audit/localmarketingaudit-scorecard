@@ -10,7 +10,7 @@ export class Lead {
   _id: string;
 
   @Prop({ required: true })
-  fullName: string;
+  fullName: string; // encrypted
 
   @Prop({ required: true })
   email: string; // encrypted
@@ -19,7 +19,7 @@ export class Lead {
   emailHash: string; // SHA-256 for dedup
 
   @Prop({ required: true })
-  phone: string;
+  phone: string; // encrypted
 
   @Prop({ required: true })
   businessName: string; // encrypted

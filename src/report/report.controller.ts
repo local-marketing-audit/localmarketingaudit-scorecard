@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, Param, Res } from '@nestjs/common';
+import { Controller, Post, Get, Body, Param, Query, Res } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { Response } from 'express';
 import { ReportService } from './report.service';
@@ -15,8 +15,12 @@ export class ReportController {
   }
 
   @Get('download/:reportId')
-  async download(@Param('reportId') reportId: string, @Res() res: Response) {
-    const { pdfData, fileSizeBytes } = await this.reportService.download(reportId);
+  async download(
+    @Param('reportId') reportId: string,
+    @Query('token') token: string,
+    @Res() res: Response,
+  ) {
+    const { pdfData, fileSizeBytes } = await this.reportService.download(reportId, token);
 
     res.set({
       'Content-Type': 'application/pdf',
@@ -25,5 +29,11 @@ export class ReportController {
     });
 
     res.send(pdfData);
+  }
+
+  @Post('email/:reportId')
+  @Throttle({ default: { ttl: 60_000, limit: 3 } })
+  async email(@Param('reportId') reportId: string, @Body('token') token: string) {
+    return this.reportService.emailReport(reportId, token);
   }
 }

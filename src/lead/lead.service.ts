@@ -33,10 +33,10 @@ export class LeadService {
     const leadId = this.id.generateId();
     await this.leadModel.create({
       _id: leadId,
-      fullName,
+      fullName: this.encryption.encrypt(fullName),
       email: this.encryption.encrypt(email),
       emailHash,
-      phone,
+      phone: this.encryption.encrypt(phone),
       businessName: this.encryption.encrypt(businessName),
       city,
       consentGiven: dto.consentGiven,

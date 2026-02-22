@@ -46,4 +46,24 @@ export class EncryptionService {
   hashForDedup(value: string): string {
     return createHash('sha256').update(value.toLowerCase().trim()).digest('hex');
   }
+
+  /** Generate an HMAC token for access control (e.g. signed report URLs) */
+  signToken(value: string): string {
+    return createHash('sha256')
+      .update(this.key)
+      .update(value)
+      .digest('hex')
+      .slice(0, 32);
+  }
+
+  /** Verify an HMAC token (constant-time comparison) */
+  verifyToken(value: string, token: string): boolean {
+    const expected = this.signToken(value);
+    if (expected.length !== token.length) return false;
+    let result = 0;
+    for (let i = 0; i < expected.length; i++) {
+      result |= expected.charCodeAt(i) ^ token.charCodeAt(i);
+    }
+    return result === 0;
+  }
 }

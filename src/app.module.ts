@@ -4,6 +4,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { CommonModule } from './common/common.module';
+import { EmailModule } from './email/email.module';
 import { LeadModule } from './lead/lead.module';
 import { QuizModule } from './quiz/quiz.module';
 import { ReportModule } from './report/report.module';
@@ -27,6 +28,7 @@ import { HealthModule } from './health/health.module';
 
     // Feature modules
     CommonModule,
+    EmailModule,
     LeadModule,
     QuizModule,
     ReportModule,
