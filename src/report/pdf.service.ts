@@ -6,8 +6,6 @@ import { inflateSync } from 'zlib';
 import type { PillarScores, PillarKey, TierKey } from '../common/types/scoring';
 import { pillars } from '../common/config/pillars';
 import { tiers } from '../common/config/tiers';
-import { PdfCompressService } from './pdf-compress.service';
-
 export interface PdfData {
   businessName: string;
   city: string;
@@ -54,7 +52,7 @@ const UNICODE_TO_WIN_ANSI: Record<number, number> = {
 export class PdfService {
   private readonly logger = new Logger(PdfService.name);
 
-  constructor(private readonly compressService: PdfCompressService) {}
+  constructor() {}
 
   /**
    * Load the Dominance Playbook PDF template and replace all
@@ -136,15 +134,7 @@ export class PdfService {
     }
 
     const pdfBytes = await pdfDoc.save();
-    const rawBuffer = Buffer.from(pdfBytes);
-
-    // Compress with Ghostscript; fall back to uncompressed on failure
-    try {
-      return await this.compressService.compress(rawBuffer);
-    } catch (err) {
-      this.logger.warn(`PDF compression failed, using uncompressed: ${err.message}`);
-      return rawBuffer;
-    }
+    return Buffer.from(pdfBytes);
   }
 
   /**
