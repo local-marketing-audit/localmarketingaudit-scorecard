@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import helmet from 'helmet';
+import compression from 'compression';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
@@ -8,6 +9,9 @@ async function bootstrap() {
 
   // Security headers
   app.use(helmet());
+
+  // Gzip compression for all responses
+  app.use(compression());
 
   // Global prefix for all routes
   app.setGlobalPrefix('api');

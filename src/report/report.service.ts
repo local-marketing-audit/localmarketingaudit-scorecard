@@ -105,25 +105,40 @@ export class ReportService {
       throw new NotFoundException('Lead not found');
     }
 
-    const decryptedEmail = this.encryption.decrypt(lead.email);
-    const businessName = this.encryption.decrypt(lead.businessName);
+    // Fire-and-forget: send email in background, respond immediately
+    this.sendEmailInBackground(reportId, lead, report.pdfData);
 
-    await this.reportModel.findByIdAndUpdate(reportId, { emailStatus: 'pending' });
+    return { sent: true };
+  }
 
-    const sent = await this.emailService.sendReportEmail({
-      toEmail: decryptedEmail,
-      businessName,
-      pdfBuffer: report.pdfData,
-    });
+  /** Send the report email in the background without blocking the API response. */
+  private async sendEmailInBackground(
+    reportId: string,
+    lead: LeadDocument,
+    pdfData: Buffer,
+  ): Promise<void> {
+    try {
+      const decryptedEmail = this.encryption.decrypt(lead.email);
+      const businessName = this.encryption.decrypt(lead.businessName);
 
-    await this.reportModel.findByIdAndUpdate(reportId, {
-      emailStatus: sent ? 'sent' : 'failed',
-    });
+      await this.reportModel.findByIdAndUpdate(reportId, { emailStatus: 'pending' });
 
-    if (!sent) {
-      this.logger.warn(`Email failed for report ${reportId}`);
+      const sent = await this.emailService.sendReportEmail({
+        toEmail: decryptedEmail,
+        businessName,
+        pdfBuffer: pdfData,
+      });
+
+      await this.reportModel.findByIdAndUpdate(reportId, {
+        emailStatus: sent ? 'sent' : 'failed',
+      });
+
+      if (!sent) {
+        this.logger.warn(`Email failed for report ${reportId}`);
+      }
+    } catch (err) {
+      this.logger.error(`Background email failed for report ${reportId}`, err);
+      await this.reportModel.findByIdAndUpdate(reportId, { emailStatus: 'failed' }).catch(() => {});
     }
-
-    return { sent };
   }
 }

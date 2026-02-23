@@ -51,8 +51,19 @@ const UNICODE_TO_WIN_ANSI: Record<number, number> = {
 @Injectable()
 export class PdfService {
   private readonly logger = new Logger(PdfService.name);
+  private templateCache: Buffer | null = null;
 
   constructor() {}
+
+  /** Read the template from disk once and cache it in memory. */
+  private async getTemplate(): Promise<Buffer> {
+    if (!this.templateCache) {
+      const templatePath = join(process.cwd(), 'src/report/templates/dominance-playbook.pdf');
+      this.templateCache = await readFile(templatePath);
+      this.logger.log(`PDF template cached (${(this.templateCache.length / 1024 / 1024).toFixed(2)} MB)`);
+    }
+    return this.templateCache;
+  }
 
   /**
    * Load the Dominance Playbook PDF template and replace all
@@ -68,8 +79,7 @@ export class PdfService {
    * the modified stream back into the PDF.
    */
   async generatePdfBuffer(data: PdfData): Promise<Buffer> {
-    const templatePath = join(process.cwd(), 'src/report/templates/dominance-playbook.pdf');
-    const templateBytes = await readFile(templatePath);
+    const templateBytes = await this.getTemplate();
 
     const tierData = tiers[data.tier];
     const lowestPillar = this.getLowestPillar(data.pillarScores);
