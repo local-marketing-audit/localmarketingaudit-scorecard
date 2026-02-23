@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { PDFDocument, PDFDict } from 'pdf-lib';
@@ -6,6 +6,7 @@ import { inflateSync } from 'zlib';
 import type { PillarScores, PillarKey, TierKey } from '../common/types/scoring';
 import { pillars } from '../common/config/pillars';
 import { tiers } from '../common/config/tiers';
+import { PdfCompressService } from './pdf-compress.service';
 
 export interface PdfData {
   businessName: string;
@@ -51,6 +52,10 @@ const UNICODE_TO_WIN_ANSI: Record<number, number> = {
 
 @Injectable()
 export class PdfService {
+  private readonly logger = new Logger(PdfService.name);
+
+  constructor(private readonly compressService: PdfCompressService) {}
+
   /**
    * Load the Dominance Playbook PDF template and replace all
    * {{placeholder}} tokens with actual quiz/lead data.
@@ -131,7 +136,15 @@ export class PdfService {
     }
 
     const pdfBytes = await pdfDoc.save();
-    return Buffer.from(pdfBytes);
+    const rawBuffer = Buffer.from(pdfBytes);
+
+    // Compress with Ghostscript; fall back to uncompressed on failure
+    try {
+      return await this.compressService.compress(rawBuffer);
+    } catch (err) {
+      this.logger.warn(`PDF compression failed, using uncompressed: ${err.message}`);
+      return rawBuffer;
+    }
   }
 
   /**

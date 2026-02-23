@@ -4,6 +4,7 @@ import { Report, ReportSchema } from './report.schema';
 import { ReportController } from './report.controller';
 import { ReportService } from './report.service';
 import { PdfService } from './pdf.service';
+import { PdfCompressService } from './pdf-compress.service';
 import { EmailModule } from '../email/email.module';
 import { QuizModule } from '../quiz/quiz.module';
 import { LeadModule } from '../lead/lead.module';
@@ -16,6 +17,6 @@ import { LeadModule } from '../lead/lead.module';
     LeadModule,
   ],
   controllers: [ReportController],
-  providers: [ReportService, PdfService],
+  providers: [ReportService, PdfService, PdfCompressService],
 })
 export class ReportModule {}

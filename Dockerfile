@@ -16,6 +16,9 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
+# Install Ghostscript for PDF compression (font subsetting, image downsampling)
+RUN apk add --no-cache ghostscript
+
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
 
