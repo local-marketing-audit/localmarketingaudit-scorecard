@@ -193,9 +193,21 @@ export class PdfService {
 
   /** Blank out the "[Developer Note: ...]" static text on page 5. */
   private removeDeveloperNote(stream: string): string {
-    return stream
-      .replace(/\[([^\]]*Developer\s*Note[^\]]*)\]\s*TJ/g, '() Tj')
-      .replace(/\[([^\]]*specific\s*segment[^\]]*)\]\s*TJ/g, '() Tj');
+    // The developer note text is split by kerning in TJ arrays,
+    // so we must concatenate string parts before checking content.
+    return stream.replace(/\[([^\]]*)\]\s*TJ/g, (fullMatch, arrayContent: string) => {
+      const parts: string[] = [];
+      const partRegex = /\(([^)]*)\)/g;
+      let match: RegExpExecArray | null;
+      while ((match = partRegex.exec(arrayContent)) !== null) {
+        parts.push(match[1]);
+      }
+      const concatenated = parts.join('');
+      if (concatenated.includes('Developer Note') || concatenated.includes('specific segment')) {
+        return '() Tj';
+      }
+      return fullMatch;
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -255,7 +267,7 @@ export class PdfService {
     stream: string,
     replacements: Record<string, string>,
   ): string {
-    if (!Object.keys(replacements).some((k) => stream.includes(k.replace(/[{}]/g, '')))) {
+    if (!stream.includes('{{')) {
       return stream;
     }
 
