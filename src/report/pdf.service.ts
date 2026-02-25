@@ -102,13 +102,23 @@ export class PdfService implements OnModuleInit {
   private templateCache: Buffer | null = null;
   private fontCache: Record<string, Buffer> | null = null;
   private preBakedTemplate: Uint8Array | null = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private parsedFonts: Record<string, any> | null = null;
 
   constructor() {}
 
-  /** Pre-warm template, fonts, and pre-baked template at startup. */
+  /** Pre-warm template, fonts, parsed fontkit objects, and pre-baked template at startup. */
   async onModuleInit(): Promise<void> {
     await this.getTemplate();
-    await this.getFontBuffers();
+    const fontBuffers = await this.getFontBuffers();
+
+    // Pre-parse fonts with fontkit at startup to avoid re-parsing per request
+    this.parsedFonts = {};
+    for (const [key, buf] of Object.entries(fontBuffers)) {
+      this.parsedFonts[key] = await (fontkit as any).create(buf);
+    }
+    this.logger.log('Fontkit fonts pre-parsed');
+
     await this.preBakeTemplate();
     this.logger.log('PDF template, fonts, and pre-baked template ready');
   }
@@ -245,21 +255,27 @@ export class PdfService implements OnModuleInit {
     };
 
     const pdfDoc = await PDFDocument.load(templateBytes);
-    pdfDoc.registerFontkit(fontkit);
 
-    // Embed fonts in parallel with subsetting for faster processing
+    // Build fonts from pre-parsed fontkit objects (bypasses fontkit.create per request)
     const fontStart = Date.now();
-    const [robotoRegular, robotoBold, robotoMedium, archivoExtraBold] =
-      await Promise.all([
-        pdfDoc.embedFont(fontBuffers.robotoRegular, { subset: true }),
-        pdfDoc.embedFont(fontBuffers.robotoBold, { subset: true }),
-        pdfDoc.embedFont(fontBuffers.robotoMedium, { subset: true }),
-        pdfDoc.embedFont(fontBuffers.archivoExtraBold, { subset: true }),
-      ]);
-    const fonts: Record<FontKey, PDFFont> = {
-      robotoRegular, robotoBold, robotoMedium, archivoExtraBold,
-    };
-    this.logger.log(`Font embedding: ${Date.now() - fontStart}ms`);
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const CustomFontSubsetEmbedder = require('pdf-lib/cjs/core/embedders/CustomFontSubsetEmbedder').default;
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const PDFFontClass = require('pdf-lib/cjs/api/PDFFont').default;
+
+    const fontKeys: FontKey[] = ['robotoRegular', 'robotoBold', 'robotoMedium', 'archivoExtraBold'];
+    const fonts = {} as Record<FontKey, PDFFont>;
+    for (const key of fontKeys) {
+      const embedder = new CustomFontSubsetEmbedder(
+        this.parsedFonts![key], fontBuffers[key], undefined, undefined,
+      );
+      const ref = pdfDoc.context.nextRef();
+      const pdfFont = PDFFontClass.of(ref, pdfDoc, embedder);
+      fonts[key] = pdfFont;
+      // Register with document so pdfDoc.save() embeds the font data
+      (pdfDoc as any).fonts.push(pdfFont);
+    }
+    this.logger.log(`Font setup: ${Date.now() - fontStart}ms`);
 
     // Build content-stream-ref → page-index map
     const pages = pdfDoc.getPages();
