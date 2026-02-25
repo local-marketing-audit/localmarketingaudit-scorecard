@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
-import { PDFDocument, PDFDict, PDFName, PDFFont, cmyk, grayscale } from 'pdf-lib';
+import { PDFDocument, PDFDict, PDFName, PDFFont, PDFString, PDFArray, cmyk, grayscale } from 'pdf-lib';
 import * as fontkit from '@pdf-lib/fontkit';
 import { inflateSync } from 'zlib';
 import type { PillarScores, PillarKey, TierKey } from '../common/types/scoring';
@@ -70,8 +70,8 @@ const PLACEHOLDER_CONFIG: Record<string, PlaceholderConfig> = {
   '{{Marketing_Score}}': { fontKey: 'robotoBold', centered: false, multiline: false, maxWidth: 0, lineHeight: 0 },
   '{{Tracking_Score}}': { fontKey: 'robotoBold', centered: false, multiline: false, maxWidth: 0, lineHeight: 0 },
   '{{Lowest_Pillar_Name}}': { fontKey: 'archivoExtraBold', centered: false, multiline: false, maxWidth: 0, lineHeight: 0 },
-  '{{Lowest_Pillar_Impact_Statement}}': { fontKey: 'robotoRegular', centered: false, multiline: true, maxWidth: 400, lineHeight: 1.3 },
-  '{{Segment_Description_Block}}': { fontKey: 'robotoRegular', centered: false, multiline: true, maxWidth: 340, lineHeight: 1.35 },
+  '{{Lowest_Pillar_Impact_Statement}}': { fontKey: 'robotoRegular', centered: false, multiline: true, maxWidth: 450, lineHeight: 1.3 },
+  '{{Segment_Description_Block}}': { fontKey: 'robotoRegular', centered: false, multiline: true, maxWidth: 400, lineHeight: 1.35 },
   '{{Primary_Focus_Area}}': { fontKey: 'robotoRegular', centered: false, multiline: false, maxWidth: 0, lineHeight: 0 },
 };
 
@@ -150,11 +150,11 @@ export class PdfService {
       '{{Total_Score}}': String(data.totalScore),
       '{{Segment_Name}}': tierData.name,
       '{{Segment_One_Liner}}': tierData.summary,
-      '{{Visibility_Score}}': String(data.pillarScores.visibility),
-      '{{Conversion_Score}}': String(data.pillarScores.conversion),
-      '{{Reputation_Score}}': String(data.pillarScores.reputation),
-      '{{Marketing_Score}}': String(data.pillarScores.marketing),
-      '{{Tracking_Score}}': String(data.pillarScores.tracking),
+      '{{Visibility_Score}}': `${data.pillarScores.visibility}/20`,
+      '{{Conversion_Score}}': `${data.pillarScores.conversion}/20`,
+      '{{Reputation_Score}}': `${data.pillarScores.reputation}/20`,
+      '{{Marketing_Score}}': `${data.pillarScores.marketing}/20`,
+      '{{Tracking_Score}}': `${data.pillarScores.tracking}/20`,
       '{{Lowest_Pillar_Name}}': pillars[lowestPillar].name,
       '{{Lowest_Pillar_Impact_Statement}}': pillars[lowestPillar].impactStatement,
       '{{Segment_Description_Block}}': tierData.descriptionBlock,
@@ -235,6 +235,17 @@ export class PdfService {
       // Blank developer note
       modified = this.blankDeveloperNote(modified);
 
+      // Page 2 (index 1): remove blue card background
+      if (pageIndex === 1) {
+        modified = this.blankPage2Background(modified);
+      }
+
+      // Page 3 (index 2): blank "/ 20" fractions and existing dots
+      if (pageIndex === 2) {
+        modified = this.blankPage3Fractions(modified);
+        modified = this.blankPage3Dots(modified);
+      }
+
       // On page 7 (index 6), blank the entire inline sentence block
       if (pageIndex === 6) {
         modified = this.blankInlinePlaceholders(modified);
@@ -280,8 +291,33 @@ export class PdfService {
         ? grayscale(pos.color.gray)
         : cmyk(pos.color.c, pos.color.m, pos.color.y, pos.color.k);
 
+      // Fix 4: Auto-size pillar name on page 4 to prevent overflow
+      if (pos.key === '{{Lowest_Pillar_Name}}') {
+        const maxTextWidth = PAGE_WIDTH - 54;
+        let drawSize = pos.fontSize;
+        let textWidth = font.widthOfTextAtSize(value, drawSize);
+        if (textWidth > maxTextWidth) {
+          drawSize = drawSize * (maxTextWidth / textWidth);
+          textWidth = font.widthOfTextAtSize(value, drawSize);
+        }
+        const cx = (PAGE_WIDTH / 2) - (textWidth / 2);
+        page.drawText(value, { x: cx, y: pos.y, size: drawSize, font, color });
+        continue;
+      }
+
+      // Fix 6: Reposition description inside card on page 5
+      if (pos.key === '{{Segment_Description_Block}}' && pos.pageIndex === 4) {
+        pos.x = 110;
+        pos.y = 615;
+      }
+
       if (config.multiline) {
-        this.drawMultiline(page, value, font, pos.fontSize, pos.x, pos.y, color, config);
+        let drawX = pos.x;
+        // Fix 5: Center impact statement block on page 4
+        if (pos.key === '{{Lowest_Pillar_Impact_Statement}}') {
+          drawX = (PAGE_WIDTH - config.maxWidth) / 2;
+        }
+        this.drawMultiline(page, value, font, pos.fontSize, drawX, pos.y, color, config);
       } else if (config.centered) {
         const w = font.widthOfTextAtSize(value, pos.fontSize);
         const cx = (PAGE_WIDTH / 2) - (w / 2);
@@ -291,6 +327,9 @@ export class PdfService {
       }
     }
 
+    // Draw page 3 dots with dynamic opacity
+    this.drawPage3Dots(pages[2], data.pillarScores);
+
     // Draw page 7 inline sentence with mixed fonts
     this.drawPage7Sentence(
       pages[6],
@@ -298,6 +337,9 @@ export class PdfService {
       replacements['{{Business_Name}}'],
       replacements['{{Primary_Focus_Area}}'],
     );
+
+    // Add clickable link on page 7 button
+    this.addPage7Link(pdfDoc, pages[6]);
 
     const pdfBytes = await pdfDoc.save();
     return Buffer.from(pdfBytes);
@@ -496,6 +538,38 @@ export class PdfService {
     return output.join('\n');
   }
 
+  /** Remove blue card background XObjects (X10, X11) from page 2 stream. */
+  private blankPage2Background(stream: string): string {
+    return stream
+      .replace(/\/X10\s+Do/g, '')
+      .replace(/\/X11\s+Do/g, '');
+  }
+
+  /** Blank "/ 20" fraction text on page 3 so scores render as "15/20". */
+  private blankPage3Fractions(stream: string): string {
+    // Blank TJ arrays containing only "/ 20"
+    let result = stream.replace(/\[((?:\([^)]*\)|[^\[\]])*)\]\s*TJ/g, (fullMatch, arrayContent: string) => {
+      const text = this.extractTJText(arrayContent);
+      if (text.trim() === '/ 20') return '() Tj';
+      return fullMatch;
+    });
+    // Blank simple Tj operators containing "/ 20"
+    result = result.replace(/\(\/ 20\)\s*Tj/g, '() Tj');
+    return result;
+  }
+
+  /** Blank existing dots on page 3 (vector dot + XObject dots X19-X22). */
+  private blankPage3Dots(stream: string): string {
+    // Blank the vector-drawn dot (bezier circle at 95.4604, 545.954)
+    let result = stream.replace(
+      /q\s*\n\s*1 0 0 1 95\.4604 545\.954 cm[\s\S]*?f\s*\n\s*Q/,
+      '',
+    );
+    // Blank XObject dots X19-X22
+    result = result.replace(/\/X(19|20|21|22)\s+Do/g, '');
+    return result;
+  }
+
   // ---------------------------------------------------------------------------
   // Phase B helpers — drawing text
   // ---------------------------------------------------------------------------
@@ -538,6 +612,81 @@ export class PdfService {
         page.drawText(part.text, { x, y, size: fontSize, font: part.font, color });
         x += part.font.widthOfTextAtSize(part.text, fontSize);
       }
+    }
+  }
+
+  /** Draw pillar dots on page 3 with opacity based on score ranges. */
+  private drawPage3Dots(
+    page: ReturnType<PDFDocument['getPages']>[0],
+    pillarScores: PillarScores,
+  ): void {
+    const dotColor = cmyk(0.874, 0.526, 0, 0);
+    const radius = 4.645;
+    const centerX = 90.815;
+
+    const dotPositions: { pillar: PillarKey; y: number }[] = [
+      { pillar: 'visibility', y: 545.954 },
+      { pillar: 'conversion', y: 480.546 },
+      { pillar: 'reputation', y: 415.137 },
+      { pillar: 'marketing', y: 349.729 },
+      { pillar: 'tracking', y: 284.321 },
+    ];
+
+    for (const { pillar, y } of dotPositions) {
+      const score = pillarScores[pillar];
+      const opacity = this.getScoreOpacity(score);
+      page.drawCircle({
+        x: centerX,
+        y,
+        size: radius,
+        color: dotColor,
+        opacity,
+        borderWidth: 0,
+      });
+    }
+  }
+
+  /** Map a pillar score to dot opacity. */
+  private getScoreOpacity(score: number): number {
+    if (score >= 16) return 1.0;
+    if (score >= 11) return 0.75;
+    return 0.5;
+  }
+
+  /** Add a clickable link annotation on the page 7 CTA button. */
+  private addPage7Link(
+    pdfDoc: PDFDocument,
+    page: ReturnType<PDFDocument['getPages']>[0],
+  ): void {
+    const context = pdfDoc.context;
+
+    // Create URI action
+    const action = context.obj({
+      S: 'URI',
+      URI: PDFString.of('https://localmarketingaudit.com'),
+    });
+
+    // Create link annotation over the button area
+    const annot = context.obj({
+      Type: 'Annot',
+      Subtype: 'Link',
+      Rect: [146.653, 426.676, 448.588, 480.87],
+      A: action,
+      Border: [0, 0, 0],
+    });
+
+    const annotRef = context.register(annot);
+
+    // Add to page's Annots array
+    const existingAnnots = page.node.get(PDFName.of('Annots'));
+    if (existingAnnots) {
+      const annotsArray = context.lookupMaybe(existingAnnots, PDFArray);
+      if (annotsArray) {
+        annotsArray.push(annotRef);
+      }
+    } else {
+      const annotsArray = context.obj([annotRef]);
+      page.node.set(PDFName.of('Annots'), annotsArray);
     }
   }
 
