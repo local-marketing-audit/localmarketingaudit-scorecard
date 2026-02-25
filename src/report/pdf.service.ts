@@ -6,6 +6,8 @@ import { inflateSync } from 'zlib';
 import type { PillarScores, PillarKey, TierKey } from '../common/types/scoring';
 import { pillars } from '../common/config/pillars';
 import { tiers } from '../common/config/tiers';
+import { calculateTextWidth, wrapText, PAGE_WIDTH } from './font-metrics';
+
 export interface PdfData {
   businessName: string;
   city: string;
@@ -48,6 +50,32 @@ const UNICODE_TO_WIN_ANSI: Record<number, number> = {
   0x0178: 0x9f,
 };
 
+/** Placeholders that need centering and/or multi-line wrapping. */
+const ALIGNED_PLACEHOLDERS: Record<
+  string,
+  { fontName: string; multiline: boolean; maxWidth: number; lineHeight: number }
+> = {
+  '{{Total_Score}}': { fontName: 'Roboto-Bold', multiline: false, maxWidth: 0, lineHeight: 0 },
+  '{{Segment_Name}}': { fontName: 'Roboto-Medium', multiline: false, maxWidth: 0, lineHeight: 0 },
+  '{{Lowest_Pillar_Name}}': { fontName: 'Archivo-ExtraBold', multiline: false, maxWidth: 0, lineHeight: 0 },
+  '{{Segment_One_Liner}}': { fontName: 'Roboto-Bold', multiline: true, maxWidth: 450, lineHeight: 1.2 },
+  '{{Lowest_Pillar_Impact_Statement}}': { fontName: 'Roboto-Regular', multiline: true, maxWidth: 400, lineHeight: 1.3 },
+  '{{Segment_Description_Block}}': { fontName: 'Roboto-Regular', multiline: true, maxWidth: 490, lineHeight: 1.35 },
+};
+
+/** Placeholders handled by simple regex replacement (left-aligned / inline). */
+const SIMPLE_KEYS = new Set([
+  '{{Business_Name}}',
+  '{{City_or_Service_Area}}',
+  '{{Report_Date}}',
+  '{{Visibility_Score}}',
+  '{{Conversion_Score}}',
+  '{{Reputation_Score}}',
+  '{{Marketing_Score}}',
+  '{{Tracking_Score}}',
+  '{{Primary_Focus_Area}}',
+]);
+
 @Injectable()
 export class PdfService {
   private readonly logger = new Logger(PdfService.name);
@@ -69,14 +97,10 @@ export class PdfService {
    * Load the Dominance Playbook PDF template and replace all
    * {{placeholder}} tokens with actual quiz/lead data.
    *
-   * The Illustrator-generated PDF stores text in TJ/Tj operators
-   * within FlateDecode content streams. Placeholders are often split
-   * across kerning-adjusted string parts in TJ arrays, e.g.:
-   *   [({{T)101.9(otal_Scor)9.6(e}})]TJ
-   *
-   * This function iterates every stream object, decompresses it,
-   * performs regex replacement on TJ/Tj operations, and reassigns
-   * the modified stream back into the PDF.
+   * Three-pass replacement:
+   *  0. Remove the developer note on page 5
+   *  1. Simple regex for left-aligned / inline placeholders
+   *  2. Stateful line-by-line scan for centered + multi-line placeholders
    */
   async generatePdfBuffer(data: PdfData): Promise<Buffer> {
     const templateBytes = await this.getTemplate();
@@ -84,7 +108,7 @@ export class PdfService {
     const tierData = tiers[data.tier];
     const lowestPillar = this.getLowestPillar(data.pillarScores);
 
-    const replacements: Record<string, string> = {
+    const allReplacements: Record<string, string> = {
       '{{Business_Name}}': data.businessName,
       '{{City_or_Service_Area}}': data.city,
       '{{Report_Date}}': this.formatDate(new Date()),
@@ -102,6 +126,16 @@ export class PdfService {
       '{{Primary_Focus_Area}}': pillars[lowestPillar].name,
     };
 
+    const simpleReplacements: Record<string, string> = {};
+    const alignedReplacements: Record<string, string> = {};
+    for (const [key, value] of Object.entries(allReplacements)) {
+      if (SIMPLE_KEYS.has(key)) {
+        simpleReplacements[key] = value;
+      } else if (key in ALIGNED_PLACEHOLDERS) {
+        alignedReplacements[key] = value;
+      }
+    }
+
     const pdfDoc = await PDFDocument.load(templateBytes);
 
     for (const [ref, obj] of pdfDoc.context.enumerateIndirectObjects()) {
@@ -118,17 +152,23 @@ export class PdfService {
         ).toString('latin1');
       }
 
-      // Fast check: does this stream contain any placeholder markers?
-      if (!text.includes('{{')) continue;
+      if (!text.includes('{{') && !text.includes('Developer Note')) continue;
 
-      let modified = this.replaceTJOperations(text, replacements);
-      modified = this.replaceTjOperations(modified, replacements);
+      let modified = text;
+
+      // Pass 0: Remove developer note
+      modified = this.removeDeveloperNote(modified);
+
+      // Pass 1: Simple left-aligned / inline replacements
+      modified = this.replaceTJOperations(modified, simpleReplacements);
+      modified = this.replaceTjOperations(modified, simpleReplacements);
+
+      // Pass 2: Centered + multi-line replacements
+      modified = this.processAlignedReplacements(modified, alignedReplacements);
 
       if (modified !== text) {
         const newStream = pdfDoc.context.flateStream(modified);
 
-        // Preserve the original stream's dictionary entries (BBox, Subtype,
-        // Resources, etc.) -- only Length and Filter are set by flateStream.
         if ('dict' in obj && (obj as { dict: unknown }).dict instanceof PDFDict) {
           const oldDict = (obj as { dict: PDFDict }).dict;
           for (const [dk, dv] of oldDict.entries()) {
@@ -147,10 +187,21 @@ export class PdfService {
     return Buffer.from(pdfBytes);
   }
 
-  /**
-   * Replace TJ array operations like: [({{City_or_Service_Ar)10(ea}})]TJ
-   * where the concatenated string parts form a known placeholder.
-   */
+  // ---------------------------------------------------------------------------
+  // Pass 0 — Developer note removal
+  // ---------------------------------------------------------------------------
+
+  /** Blank out the "[Developer Note: ...]" static text on page 5. */
+  private removeDeveloperNote(stream: string): string {
+    return stream
+      .replace(/\[([^\]]*Developer\s*Note[^\]]*)\]\s*TJ/g, '() Tj')
+      .replace(/\[([^\]]*specific\s*segment[^\]]*)\]\s*TJ/g, '() Tj');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pass 1 — Simple left-aligned replacements
+  // ---------------------------------------------------------------------------
+
   private replaceTJOperations(
     stream: string,
     replacements: Record<string, string>,
@@ -176,9 +227,6 @@ export class PdfService {
     });
   }
 
-  /**
-   * Replace simple Tj operations like: ({{Business_Name}})Tj
-   */
   private replaceTjOperations(
     stream: string,
     replacements: Record<string, string>,
@@ -194,6 +242,184 @@ export class PdfService {
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // Pass 2 — Centered + multi-line replacements
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Stateful line-by-line scan. Tracks Tm (text matrix) and Td (relative
+   * moves) so centered placeholders can be repositioned and long text
+   * word-wrapped into multiple lines.
+   */
+  private processAlignedReplacements(
+    stream: string,
+    replacements: Record<string, string>,
+  ): string {
+    if (!Object.keys(replacements).some((k) => stream.includes(k.replace(/[{}]/g, '')))) {
+      return stream;
+    }
+
+    const lines = stream.split('\n');
+    const output: string[] = [];
+
+    let lastTmScale = 0;
+    let lastTmX = 0;
+    let lastTmY = 0;
+    let lastTmOutputIdx = -1;
+    let pendingTd: { x: number; y: number; outputIdx: number } | null = null;
+
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = lines[i].trim();
+
+      // Track Tm: a b c d tx ty Tm
+      const tmMatch = trimmed.match(
+        /^(-?\d+\.?\d*)\s+(-?\d+\.?\d*)\s+(-?\d+\.?\d*)\s+(-?\d+\.?\d*)\s+(-?\d+\.?\d*)\s+(-?\d+\.?\d*)\s+Tm$/,
+      );
+      if (tmMatch) {
+        lastTmScale = parseFloat(tmMatch[1]) || parseFloat(tmMatch[4]);
+        lastTmX = parseFloat(tmMatch[5]);
+        lastTmY = parseFloat(tmMatch[6]);
+        lastTmOutputIdx = output.length;
+        pendingTd = null;
+        output.push(lines[i]);
+        continue;
+      }
+
+      // Track Td / TD
+      const tdMatch = trimmed.match(/^(-?\d+\.?\d*)\s+(-?\d+\.?\d*)\s+T[dD]$/);
+      if (tdMatch) {
+        pendingTd = {
+          x: parseFloat(tdMatch[1]),
+          y: parseFloat(tdMatch[2]),
+          outputIdx: output.length,
+        };
+        output.push(lines[i]);
+        continue;
+      }
+
+      // Check TJ array for aligned placeholder
+      const tjArrayMatch = trimmed.match(/^\[([^\]]*)\]\s*TJ$/);
+      if (tjArrayMatch) {
+        const concatenated = this.extractTJText(tjArrayMatch[1]);
+        const found = this.findAlignedPlaceholder(concatenated, replacements);
+        if (found) {
+          this.emitAligned(
+            output, found, replacements[found],
+            lastTmScale, lastTmX, lastTmY, lastTmOutputIdx, pendingTd,
+          );
+          pendingTd = null;
+          continue;
+        }
+      }
+
+      // Check simple Tj for aligned placeholder
+      const tjMatch = trimmed.match(/^\(([^)]*)\)\s*Tj$/);
+      if (tjMatch) {
+        const found = this.findAlignedPlaceholder(tjMatch[1], replacements);
+        if (found) {
+          this.emitAligned(
+            output, found, replacements[found],
+            lastTmScale, lastTmX, lastTmY, lastTmOutputIdx, pendingTd,
+          );
+          pendingTd = null;
+          continue;
+        }
+      }
+
+      output.push(lines[i]);
+    }
+
+    return output.join('\n');
+  }
+
+  /**
+   * Emit correctly centered (and optionally wrapped) replacement text,
+   * adjusting or replacing preceding Tm / Td lines in the output.
+   */
+  private emitAligned(
+    output: string[],
+    placeholder: string,
+    rawValue: string,
+    tmScale: number,
+    tmX: number,
+    tmY: number,
+    tmOutputIdx: number,
+    pendingTd: { x: number; y: number; outputIdx: number } | null,
+  ): void {
+    const config = ALIGNED_PLACEHOLDERS[placeholder];
+    if (!config) return;
+
+    const fontSize = tmScale;
+    const escaped = this.escapePdfString(rawValue);
+
+    // Compute absolute position
+    let absY: number;
+    if (pendingTd) {
+      absY = tmY + pendingTd.y * tmScale;
+      // Remove the Td line from output
+      output.splice(pendingTd.outputIdx, 1);
+    } else {
+      absY = tmY;
+    }
+
+    if (!config.multiline) {
+      // ---- Single-line centered ----
+      const textWidth = calculateTextWidth(rawValue, config.fontName, fontSize);
+      const newX = (PAGE_WIDTH / 2) - (textWidth / 2);
+
+      if (!pendingTd && tmOutputIdx >= 0 && tmOutputIdx < output.length) {
+        output[tmOutputIdx] = `${fontSize} 0 0 ${fontSize} ${newX.toFixed(3)} ${absY} Tm`;
+      }
+      output.push(`(${escaped}) Tj`);
+    } else {
+      // ---- Multi-line centered ----
+      const wrapped = wrapText(rawValue, config.fontName, fontSize, config.maxWidth);
+      const lineSpacingPt = fontSize * config.lineHeight;
+
+      const newLines: string[] = [];
+      for (let j = 0; j < wrapped.length; j++) {
+        const lineEscaped = this.escapePdfString(wrapped[j]);
+        const lineWidth = calculateTextWidth(wrapped[j], config.fontName, fontSize);
+        const lineX = (PAGE_WIDTH / 2) - (lineWidth / 2);
+        const lineY = absY - j * lineSpacingPt;
+        newLines.push(`${fontSize} 0 0 ${fontSize} ${lineX.toFixed(3)} ${lineY.toFixed(3)} Tm`);
+        newLines.push(`(${lineEscaped}) Tj`);
+      }
+
+      if (!pendingTd && tmOutputIdx >= 0 && tmOutputIdx < output.length) {
+        output.splice(tmOutputIdx, 1, ...newLines);
+      } else {
+        output.push(...newLines);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+
+  /** Concatenate string parts inside a TJ array, stripping kerning values. */
+  private extractTJText(arrayContent: string): string {
+    const parts: string[] = [];
+    const partRegex = /\(([^)]*)\)/g;
+    let match: RegExpExecArray | null;
+    while ((match = partRegex.exec(arrayContent)) !== null) {
+      parts.push(match[1]);
+    }
+    return parts.join('');
+  }
+
+  /** Return the placeholder key if `text` contains an aligned placeholder. */
+  private findAlignedPlaceholder(
+    text: string,
+    replacements: Record<string, string>,
+  ): string | null {
+    for (const key of Object.keys(replacements)) {
+      if (text.includes(key)) return key;
+    }
+    return null;
+  }
+
   /** Convert a Unicode string to WinAnsiEncoding bytes, then escape for PDF. */
   private escapePdfString(str: string): string {
     let result = '';
@@ -205,7 +431,6 @@ export class PdfService {
       } else if (cp <= 0xff) {
         result += ch;
       } else {
-        // Character not in WinAnsiEncoding -- replace with '?'
         result += '?';
       }
     }
