@@ -301,6 +301,18 @@ export class PdfService {
         ? grayscale(pos.color.gray)
         : cmyk(pos.color.c, pos.color.m, pos.color.y, pos.color.k);
 
+      // Fix 1: Center Total_Score inside the circular ring on page 2
+      if (pos.key === '{{Total_Score}}' && pos.pageIndex === 1) {
+        const ringCenterX = 297.6;
+        const ringCenterY = 475.1;
+        const textWidth = font.widthOfTextAtSize(value, pos.fontSize);
+        const capHeight = pos.fontSize * 0.71; // Roboto Bold cap height ratio
+        const x = ringCenterX - textWidth / 2;
+        const y = ringCenterY - capHeight / 2;
+        page.drawText(value, { x, y, size: pos.fontSize, font, color });
+        continue;
+      }
+
       // Fix 2: Right-align score placeholders on page 3
       if (pos.key.endsWith('_Score}}')) {
         const textWidth = font.widthOfTextAtSize(value, pos.fontSize);
@@ -309,10 +321,26 @@ export class PdfService {
         continue;
       }
 
-      // Fix 4: Reposition description inside card on page 5
+      // Fix 3: Reposition description inside card on page 5 + extend card if needed
       if (pos.key === '{{Segment_Description_Block}}' && pos.pageIndex === 4) {
         pos.x = 120;
-        pos.y = 580;
+        pos.y = 560;
+
+        // Draw card background extension if text overflows below the card
+        const descLines = this.wrapText(rawValue, font, pos.fontSize, config.maxWidth);
+        const lineSpacing = pos.fontSize * config.lineHeight;
+        const textBottom = pos.y - (descLines.length - 1) * lineSpacing - pos.fontSize;
+        const cardBottom = 170;
+
+        if (textBottom < cardBottom) {
+          page.drawRectangle({
+            x: 82,
+            y: textBottom - 20,
+            width: 432,
+            height: cardBottom - textBottom + 30,
+            color: grayscale(0.941),
+          });
+        }
       }
 
       if (config.multiline) {
@@ -703,7 +731,7 @@ export class PdfService {
 
     // Calculate total content height
     const gap1 = 20; // heading to pillar name
-    const gap2 = 25; // pillar name to impact
+    const gap2 = 10; // pillar name to impact
     const totalHeight = headingSize + gap1 + pillarSize + gap2 + impactHeight;
 
     // Center vertically in available area (y=60 to y=740)
@@ -872,7 +900,7 @@ export class PdfService {
   private formatDate(date: Date): string {
     return date.toLocaleDateString('en-US', {
       year: 'numeric',
-      month: 'long',
+      month: 'short',
       day: 'numeric',
     });
   }
