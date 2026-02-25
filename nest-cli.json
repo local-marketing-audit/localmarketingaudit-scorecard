@@ -3,7 +3,7 @@
   "collection": "@nestjs/schematics",
   "sourceRoot": "src",
   "compilerOptions": {
-    "assets": ["**/*.pdf"],
+    "assets": ["**/*.pdf", "**/*.ttf"],
     "watchAssets": true
   }
 }

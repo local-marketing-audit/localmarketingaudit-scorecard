@@ -106,7 +106,7 @@ export class PdfService {
 
   private async getTemplate(): Promise<Buffer> {
     if (!this.templateCache) {
-      const templatePath = join(process.cwd(), 'src/report/templates/dominance-playbook.pdf');
+      const templatePath = join(__dirname, 'templates/dominance-playbook.pdf');
       this.templateCache = await readFile(templatePath);
       this.logger.log(`PDF template cached (${(this.templateCache.length / 1024 / 1024).toFixed(2)} MB)`);
     }
@@ -115,7 +115,7 @@ export class PdfService {
 
   private async getFontBuffers(): Promise<Record<string, Buffer>> {
     if (!this.fontCache) {
-      const fontsDir = join(process.cwd(), 'src/report/fonts');
+      const fontsDir = join(__dirname, 'fonts');
       const [robotoRegular, robotoBold, robotoMedium, archivoBold, archivoExtraBold] =
         await Promise.all([
           readFile(join(fontsDir, 'Roboto-Regular.ttf')),
