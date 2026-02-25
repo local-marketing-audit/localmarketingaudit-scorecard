@@ -8,7 +8,7 @@ export class Report {
   @Prop({ type: String, required: true })
   _id: string; // nanoid(12)
 
-  @Prop({ required: true, index: true })
+  @Prop({ required: true, index: true, unique: true })
   sessionId: string;
 
   @Prop({ required: true })

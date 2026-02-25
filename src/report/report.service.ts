@@ -56,7 +56,11 @@ export class ReportService {
     });
 
     const reportId = this.id.generateShortId();
-    await this.reportModel.create({
+    const token = this.encryption.signToken(reportId);
+
+    // Fire-and-forget: write PDF to MongoDB in background
+    // User sees results page first; download happens later
+    this.reportModel.create({
       _id: reportId,
       sessionId,
       leadId: quizResponse.leadId,
@@ -64,9 +68,11 @@ export class ReportService {
       fileSizeBytes: pdfBuffer.length,
       generatedAt: new Date(),
       emailStatus: 'skipped',
+    }).catch((err) => {
+      this.logger.error(`Background MongoDB write failed for report ${reportId}`, err);
     });
 
-    return { reportId, token: this.encryption.signToken(reportId) };
+    return { reportId, token };
   }
 
   /** Verify a signed access token for a reportId */
@@ -78,7 +84,13 @@ export class ReportService {
 
   async download(reportId: string, token: string): Promise<{ pdfData: Buffer; fileSizeBytes: number }> {
     this.verifyAccess(reportId, token);
-    const report = await this.reportModel.findById(reportId);
+    let report = await this.reportModel.findById(reportId);
+
+    // Retry once after short delay — handles race with background MongoDB write
+    if (!report) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      report = await this.reportModel.findById(reportId);
+    }
     if (!report) {
       throw new NotFoundException('Report not found');
     }
@@ -95,7 +107,13 @@ export class ReportService {
   async emailReport(reportId: string, token: string): Promise<{ sent: boolean }> {
     this.verifyAccess(reportId, token);
 
-    const report = await this.reportModel.findById(reportId);
+    let report = await this.reportModel.findById(reportId);
+
+    // Retry once after short delay — handles race with background MongoDB write
+    if (!report) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      report = await this.reportModel.findById(reportId);
+    }
     if (!report) {
       throw new NotFoundException('Report not found');
     }

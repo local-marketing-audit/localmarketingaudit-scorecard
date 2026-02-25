@@ -42,7 +42,6 @@ type FontKey =
   | 'robotoRegular'
   | 'robotoBold'
   | 'robotoMedium'
-  | 'archivoBold'
   | 'archivoExtraBold';
 
 interface PlaceholderConfig {
@@ -93,7 +92,7 @@ function baseFontToKey(name: string): FontKey | null {
   if (name.includes('Roboto-Bold')) return 'robotoBold';
   if (name.includes('Roboto-Regular')) return 'robotoRegular';
   if (name.includes('Archivo-ExtraBold')) return 'archivoExtraBold';
-  if (name.includes('Archivo-Bold')) return 'archivoBold';
+  if (name.includes('Archivo-Bold')) return 'archivoExtraBold';
   return null;
 }
 
@@ -102,14 +101,16 @@ export class PdfService implements OnModuleInit {
   private readonly logger = new Logger(PdfService.name);
   private templateCache: Buffer | null = null;
   private fontCache: Record<string, Buffer> | null = null;
+  private preBakedTemplate: Uint8Array | null = null;
 
   constructor() {}
 
-  /** Pre-warm template and font caches at startup. */
+  /** Pre-warm template, fonts, and pre-baked template at startup. */
   async onModuleInit(): Promise<void> {
     await this.getTemplate();
     await this.getFontBuffers();
-    this.logger.log('PDF template and fonts pre-warmed');
+    await this.preBakeTemplate();
+    this.logger.log('PDF template, fonts, and pre-baked template ready');
   }
 
   private async getTemplate(): Promise<Buffer> {
@@ -124,28 +125,102 @@ export class PdfService implements OnModuleInit {
   private async getFontBuffers(): Promise<Record<string, Buffer>> {
     if (!this.fontCache) {
       const fontsDir = join(__dirname, 'fonts');
-      const [robotoRegular, robotoBold, robotoMedium, archivoBold, archivoExtraBold] =
+      const [robotoRegular, robotoBold, robotoMedium, archivoExtraBold] =
         await Promise.all([
           readFile(join(fontsDir, 'Roboto-Regular.ttf')),
           readFile(join(fontsDir, 'Roboto-Bold.ttf')),
           readFile(join(fontsDir, 'Roboto-Medium.ttf')),
-          readFile(join(fontsDir, 'Archivo-Bold.ttf')),
           readFile(join(fontsDir, 'Archivo-ExtraBold.ttf')),
         ]);
-      this.fontCache = { robotoRegular, robotoBold, robotoMedium, archivoBold, archivoExtraBold };
+      this.fontCache = { robotoRegular, robotoBold, robotoMedium, archivoExtraBold };
       this.logger.log('Font files cached');
     }
     return this.fontCache;
   }
 
   /**
+   * Pre-bake static blanking into the template once at startup.
+   * Runs all deterministic Phase A operations (developer notes, page backgrounds,
+   * fractions, dots, headings, inner cards) so they don't run per-request.
+   */
+  private async preBakeTemplate(): Promise<void> {
+    const templateBytes = await this.getTemplate();
+    const pdfDoc = await PDFDocument.load(templateBytes);
+
+    const pages = pdfDoc.getPages();
+    const refToPageIdx = new Map<string, number>();
+    for (let i = 0; i < pages.length; i++) {
+      const contentsRef = pages[i].node.get(PDFName.of('Contents'));
+      if (contentsRef) refToPageIdx.set(contentsRef.toString(), i);
+    }
+
+    for (const [ref, obj] of pdfDoc.context.enumerateIndirectObjects()) {
+      if (!('contents' in obj)) continue;
+
+      const pageIndex = refToPageIdx.get(ref.toString());
+      if (pageIndex === undefined) continue;
+
+      let text: string;
+      try {
+        text = inflateSync(
+          Buffer.from((obj as { contents: Uint8Array }).contents),
+        ).toString('latin1');
+      } catch {
+        text = Buffer.from(
+          (obj as { contents: Uint8Array }).contents,
+        ).toString('latin1');
+      }
+
+      if (!text.includes('{{') && !text.includes('Developer Note')) continue;
+
+      let modified = text;
+
+      // Apply all STATIC blanking (identical every request)
+      modified = this.blankDeveloperNote(modified);
+      if (pageIndex === 1) {
+        modified = this.blankPage2Background(modified);
+        modified = this.blankPage2OutOf100(modified);
+      }
+      if (pageIndex === 3) {
+        modified = this.blankPage4Heading(modified);
+      }
+      if (pageIndex === 2) {
+        modified = this.blankPage3Fractions(modified);
+        modified = this.blankPage3Dots(modified);
+      }
+      if (pageIndex === 4) {
+        modified = this.blankPage5InnerCard(modified);
+      }
+
+      if (modified !== text) {
+        const newStream = pdfDoc.context.flateStream(modified);
+        if ('dict' in obj && (obj as { dict: unknown }).dict instanceof PDFDict) {
+          const oldDict = (obj as { dict: PDFDict }).dict;
+          for (const [dk, dv] of oldDict.entries()) {
+            const key = dk.toString();
+            if (key !== '/Length' && key !== '/Filter') {
+              newStream.dict.set(dk, dv);
+            }
+          }
+        }
+        pdfDoc.context.assign(ref, newStream);
+      }
+    }
+
+    this.preBakedTemplate = await pdfDoc.save();
+    this.logger.log(
+      `Pre-baked template cached (${(this.preBakedTemplate.length / 1024 / 1024).toFixed(2)} MB)`,
+    );
+  }
+
+  /**
    * Generate a Dominance Playbook PDF by:
-   * 1. Blanking all placeholder text in the template's content streams
+   * 1. Blanking remaining placeholder text in the pre-baked template's content streams
    * 2. Drawing replacement text on each page using embedded full fonts
    */
   async generatePdfBuffer(data: PdfData): Promise<Buffer> {
     const genStart = Date.now();
-    const templateBytes = await this.getTemplate();
+    const templateBytes = this.preBakedTemplate!;
     const fontBuffers = await this.getFontBuffers();
 
     const tierData = tiers[data.tier];
@@ -174,16 +249,15 @@ export class PdfService implements OnModuleInit {
 
     // Embed fonts in parallel with subsetting for faster processing
     const fontStart = Date.now();
-    const [robotoRegular, robotoBold, robotoMedium, archivoBold, archivoExtraBold] =
+    const [robotoRegular, robotoBold, robotoMedium, archivoExtraBold] =
       await Promise.all([
         pdfDoc.embedFont(fontBuffers.robotoRegular, { subset: true }),
         pdfDoc.embedFont(fontBuffers.robotoBold, { subset: true }),
         pdfDoc.embedFont(fontBuffers.robotoMedium, { subset: true }),
-        pdfDoc.embedFont(fontBuffers.archivoBold, { subset: true }),
         pdfDoc.embedFont(fontBuffers.archivoExtraBold, { subset: true }),
       ]);
     const fonts: Record<FontKey, PDFFont> = {
-      robotoRegular, robotoBold, robotoMedium, archivoBold, archivoExtraBold,
+      robotoRegular, robotoBold, robotoMedium, archivoExtraBold,
     };
     this.logger.log(`Font embedding: ${Date.now() - fontStart}ms`);
 
@@ -222,7 +296,8 @@ export class PdfService implements OnModuleInit {
       pageFontMaps.set(i, mapping);
     }
 
-    // Phase A: Blank placeholders in streams and record their positions
+    // Phase A: Blank remaining placeholders and record positions
+    // (Static blanking already done in pre-baked template)
     const positions: PlaceholderPosition[] = [];
 
     for (const [ref, obj] of pdfDoc.context.enumerateIndirectObjects()) {
@@ -242,36 +317,11 @@ export class PdfService implements OnModuleInit {
         ).toString('latin1');
       }
 
-      if (!text.includes('{{') && !text.includes('Developer Note')) continue;
+      if (!text.includes('{{')) continue;
 
       let modified = text;
 
-      // Blank developer note
-      modified = this.blankDeveloperNote(modified);
-
-      // Page 2 (index 1): remove blue card background + blank "out of 100"
-      if (pageIndex === 1) {
-        modified = this.blankPage2Background(modified);
-        modified = this.blankPage2OutOf100(modified);
-      }
-
-      // Page 4 (index 3): blank static heading for vertical re-centering
-      if (pageIndex === 3) {
-        modified = this.blankPage4Heading(modified);
-      }
-
-      // Page 3 (index 2): blank "/ 20" fractions and existing dots
-      if (pageIndex === 2) {
-        modified = this.blankPage3Fractions(modified);
-        modified = this.blankPage3Dots(modified);
-      }
-
-      // Page 5 (index 4): blank inner card (X36) and accent line for dynamic redraw
-      if (pageIndex === 4) {
-        modified = this.blankPage5InnerCard(modified);
-      }
-
-      // On page 7 (index 6), blank the entire inline sentence block
+      // Page 7 (index 6): blank the inline sentence block (per-request)
       if (pageIndex === 6) {
         modified = this.blankInlinePlaceholders(modified);
       }
