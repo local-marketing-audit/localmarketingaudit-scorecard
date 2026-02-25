@@ -71,7 +71,7 @@ const PLACEHOLDER_CONFIG: Record<string, PlaceholderConfig> = {
   '{{Tracking_Score}}': { fontKey: 'robotoBold', centered: false, multiline: false, maxWidth: 0, lineHeight: 0 },
   '{{Lowest_Pillar_Name}}': { fontKey: 'archivoExtraBold', centered: false, multiline: false, maxWidth: 0, lineHeight: 0 },
   '{{Lowest_Pillar_Impact_Statement}}': { fontKey: 'robotoRegular', centered: true, multiline: true, maxWidth: 450, lineHeight: 1.3 },
-  '{{Segment_Description_Block}}': { fontKey: 'robotoRegular', centered: false, multiline: true, maxWidth: 370, lineHeight: 1.35 },
+  '{{Segment_Description_Block}}': { fontKey: 'robotoRegular', centered: false, multiline: true, maxWidth: 380, lineHeight: 1.35 },
   '{{Primary_Focus_Area}}': { fontKey: 'robotoRegular', centered: false, multiline: false, maxWidth: 0, lineHeight: 0 },
 };
 
@@ -235,9 +235,10 @@ export class PdfService {
       // Blank developer note
       modified = this.blankDeveloperNote(modified);
 
-      // Page 2 (index 1): remove blue card background
+      // Page 2 (index 1): remove blue card background + blank "out of 100"
       if (pageIndex === 1) {
         modified = this.blankPage2Background(modified);
+        modified = this.blankPage2OutOf100(modified);
       }
 
       // Page 4 (index 3): blank static heading for vertical re-centering
@@ -249,6 +250,11 @@ export class PdfService {
       if (pageIndex === 2) {
         modified = this.blankPage3Fractions(modified);
         modified = this.blankPage3Dots(modified);
+      }
+
+      // Page 5 (index 4): blank inner card (X36) and accent line for dynamic redraw
+      if (pageIndex === 4) {
+        modified = this.blankPage5InnerCard(modified);
       }
 
       // On page 7 (index 6), blank the entire inline sentence block
@@ -301,15 +307,8 @@ export class PdfService {
         ? grayscale(pos.color.gray)
         : cmyk(pos.color.c, pos.color.m, pos.color.y, pos.color.k);
 
-      // Fix 1: Center Total_Score inside the circular ring on page 2
+      // Skip Total_Score on page 2 — handled by drawPage2Score()
       if (pos.key === '{{Total_Score}}' && pos.pageIndex === 1) {
-        const ringCenterX = 297.6;
-        const ringCenterY = 475.1;
-        const textWidth = font.widthOfTextAtSize(value, pos.fontSize);
-        const capHeight = pos.fontSize * 0.71; // Roboto Bold cap height ratio
-        const x = ringCenterX - textWidth / 2;
-        const y = ringCenterY - capHeight / 2;
-        page.drawText(value, { x, y, size: pos.fontSize, font, color });
         continue;
       }
 
@@ -321,26 +320,45 @@ export class PdfService {
         continue;
       }
 
-      // Fix 3: Reposition description inside card on page 5 + extend card if needed
+      // Page 5: Draw dynamic inner card (replaces blanked X36) + reposition description
       if (pos.key === '{{Segment_Description_Block}}' && pos.pageIndex === 4) {
-        pos.x = 120;
-        pos.y = 560;
-
-        // Draw card background extension if text overflows below the card
+        // Calculate text dimensions
         const descLines = this.wrapText(rawValue, font, pos.fontSize, config.maxWidth);
         const lineSpacing = pos.fontSize * config.lineHeight;
-        const textBottom = pos.y - (descLines.length - 1) * lineSpacing - pos.fontSize;
-        const cardBottom = 170;
+        const textHeight = (descLines.length - 1) * lineSpacing + pos.fontSize;
 
-        if (textBottom < cardBottom) {
-          page.drawRectangle({
-            x: 82,
-            y: textBottom - 20,
-            width: 432,
-            height: cardBottom - textBottom + 30,
-            color: grayscale(0.941),
-          });
-        }
+        // Inner card bounds (matching original X36 left/right, extended vertically)
+        const innerLeft = 84.7;
+        const innerRight = 510.6;
+        const innerWidth = innerRight - innerLeft;
+        const innerTop = 597.4;  // original X36 top
+        const textStartY = innerTop - 25;  // padding from inner card top
+        const innerBottom = textStartY - textHeight - 20;  // padding below text
+        const innerHeight = innerTop - innerBottom;
+
+        // Draw inner card background (blue with transparency, matching X36)
+        page.drawRectangle({
+          x: innerLeft,
+          y: innerBottom,
+          width: innerWidth,
+          height: innerHeight,
+          color: cmyk(0.874, 0.526, 0, 0),
+          opacity: 0.12,
+        });
+
+        // Draw blue accent line on left (matching template accent: x≈96, w≈2)
+        page.drawRectangle({
+          x: 95.9,
+          y: innerBottom + 10,
+          width: 1.548,
+          height: innerHeight - 20,
+          color: cmyk(0.877, 0.533, 0, 0),
+          opacity: 1,
+        });
+
+        // Position text inside the inner card
+        pos.x = 115;
+        pos.y = textStartY;
       }
 
       if (config.multiline) {
@@ -353,6 +371,9 @@ export class PdfService {
         page.drawText(value, { x: pos.x, y: pos.y, size: pos.fontSize, font, color });
       }
     }
+
+    // Draw page 2 score + "out of 100" centered in ring
+    this.drawPage2Score(pages[1], fonts, replacements['{{Total_Score}}']);
 
     // Draw page 3 dots with dynamic opacity
     this.drawPage3Dots(pages[2], data.pillarScores);
@@ -578,6 +599,11 @@ export class PdfService {
     return stream.replace(/\/X10\s+Do/g, '');
   }
 
+  /** Blank "out of 100" template text on page 2 (we redraw it in drawPage2Score). */
+  private blankPage2OutOf100(stream: string): string {
+    return stream.replace(/\(out of 100\)\s*Tj/g, '() Tj');
+  }
+
   /** Blank "/ 20" fraction text on page 3 so scores render as "15/20". */
   private blankPage3Fractions(stream: string): string {
     // Blank TJ arrays containing only "/ 20"
@@ -598,6 +624,15 @@ export class PdfService {
       if (text.includes('Biggest Growth Opportunity')) return '() Tj';
       return fullMatch;
     });
+  }
+
+  /** Blank inner card (X36) and accent line on page 5 for dynamic-height redraw. */
+  private blankPage5InnerCard(stream: string): string {
+    // Remove X36 (small inner card ~50pt tall)
+    let result = stream.replace(/\/X36\s+Do/g, '');
+    // Remove the inline accent line rectangle (97.437 556.683 -1.548 31.587 re\nf)
+    result = result.replace(/97\.437\s+556\.683\s+-1\.548\s+31\.587\s+re\s*\nf/g, '');
+    return result;
   }
 
   /** Blank existing dots on page 3 (vector dot + XObject dots X19-X22). */
@@ -655,6 +690,58 @@ export class PdfService {
         x += part.font.widthOfTextAtSize(part.text, fontSize);
       }
     }
+  }
+
+  /**
+   * Draw score number + "out of 100" label centered as a pair in the ring on page 2.
+   */
+  private drawPage2Score(
+    page: ReturnType<PDFDocument['getPages']>[0],
+    fonts: Record<FontKey, PDFFont>,
+    totalScore: string,
+  ): void {
+    const ringCenterX = 297.637;
+    const ringCenterY = 475.138;
+
+    // Score: Roboto Bold, 52pt, dark color (from template)
+    const scoreFont = fonts.robotoBold;
+    const scoreSize = 52;
+    const scoreColor = cmyk(0.732, 0.672, 0.657, 0.82);
+
+    // "out of 100": Roboto Bold, 20pt, blue (from template color)
+    const labelFont = fonts.robotoBold;
+    const labelSize = 20;
+    const labelText = 'out of 100';
+    const labelColor = cmyk(0.874, 0.526, 0, 0);
+
+    // Vertical centering of the pair within the ring
+    const scoreCapHeight = scoreSize * 0.71;   // ~36.9pt
+    const labelCapHeight = labelSize * 0.71;   // ~14.2pt
+    const gap = 5; // visual gap between score bottom and label top
+    const totalHeight = scoreCapHeight + gap + labelCapHeight; // ~56.1pt
+
+    const scoreBaseline = ringCenterY + totalHeight / 2 - scoreCapHeight;
+    const labelBaseline = scoreBaseline - gap - labelCapHeight;
+
+    // Draw score (centered horizontally)
+    const scoreWidth = scoreFont.widthOfTextAtSize(totalScore, scoreSize);
+    page.drawText(totalScore, {
+      x: ringCenterX - scoreWidth / 2,
+      y: scoreBaseline,
+      size: scoreSize,
+      font: scoreFont,
+      color: scoreColor,
+    });
+
+    // Draw "out of 100" (centered horizontally)
+    const labelWidth = labelFont.widthOfTextAtSize(labelText, labelSize);
+    page.drawText(labelText, {
+      x: ringCenterX - labelWidth / 2,
+      y: labelBaseline,
+      size: labelSize,
+      font: labelFont,
+      color: labelColor,
+    });
   }
 
   /** Draw pillar dots on page 3 with opacity based on score ranges. */
