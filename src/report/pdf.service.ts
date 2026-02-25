@@ -71,7 +71,7 @@ const PLACEHOLDER_CONFIG: Record<string, PlaceholderConfig> = {
   '{{Tracking_Score}}': { fontKey: 'robotoBold', centered: false, multiline: false, maxWidth: 0, lineHeight: 0 },
   '{{Lowest_Pillar_Name}}': { fontKey: 'archivoExtraBold', centered: false, multiline: false, maxWidth: 0, lineHeight: 0 },
   '{{Lowest_Pillar_Impact_Statement}}': { fontKey: 'robotoRegular', centered: false, multiline: true, maxWidth: 400, lineHeight: 1.3 },
-  '{{Segment_Description_Block}}': { fontKey: 'robotoRegular', centered: false, multiline: true, maxWidth: 490, lineHeight: 1.35 },
+  '{{Segment_Description_Block}}': { fontKey: 'robotoRegular', centered: false, multiline: true, maxWidth: 340, lineHeight: 1.35 },
   '{{Primary_Focus_Area}}': { fontKey: 'robotoRegular', centered: false, multiline: false, maxWidth: 0, lineHeight: 0 },
 };
 
@@ -84,6 +84,7 @@ interface PlaceholderPosition {
   fontSize: number;
   fontKey: FontKey;
   color: { c: number; m: number; y: number; k: number } | { gray: number };
+  suffix: string;
 }
 
 /** Map a BaseFont name (with subset prefix) to a FontKey. */
@@ -234,6 +235,11 @@ export class PdfService {
       // Blank developer note
       modified = this.blankDeveloperNote(modified);
 
+      // On page 7 (index 6), blank the entire inline sentence block
+      if (pageIndex === 6) {
+        modified = this.blankInlinePlaceholders(modified);
+      }
+
       const fontMap = pageFontMaps.get(pageIndex) ?? {};
 
       // Blank all placeholders and record positions
@@ -256,8 +262,14 @@ export class PdfService {
 
     // Phase B: Draw replacement text on pages using embedded fonts
     for (const pos of positions) {
-      const value = replacements[pos.key];
-      if (value === undefined) continue;
+      // Skip page 7 inline placeholders — handled separately below
+      if (pos.pageIndex === 6 && (pos.key === '{{Business_Name}}' || pos.key === '{{Primary_Focus_Area}}')) {
+        continue;
+      }
+
+      const rawValue = replacements[pos.key];
+      if (rawValue === undefined) continue;
+      const value = rawValue + pos.suffix;
 
       const config = PLACEHOLDER_CONFIG[pos.key];
       if (!config) continue;
@@ -279,6 +291,14 @@ export class PdfService {
       }
     }
 
+    // Draw page 7 inline sentence with mixed fonts
+    this.drawPage7Sentence(
+      pages[6],
+      fonts,
+      replacements['{{Business_Name}}'],
+      replacements['{{Primary_Focus_Area}}'],
+    );
+
     const pdfBytes = await pdfDoc.save();
     return Buffer.from(pdfBytes);
   }
@@ -289,7 +309,8 @@ export class PdfService {
 
   /** Blank developer note TJ arrays. */
   private blankDeveloperNote(stream: string): string {
-    return stream.replace(/\[([^\]]*)\]\s*TJ/g, (fullMatch, arrayContent: string) => {
+    // Regex handles ] inside parenthesized strings: match (…) or any non-bracket char
+    return stream.replace(/\[((?:\([^)]*\)|[^\[\]])*)\]\s*TJ/g, (fullMatch, arrayContent: string) => {
       const concatenated = this.extractTJText(arrayContent);
       if (concatenated.includes('Developer Note') || concatenated.includes('specific segment')) {
         return '() Tj';
@@ -377,11 +398,12 @@ export class PdfService {
       }
 
       // Check TJ array for placeholder
-      const tjArrayMatch = trimmed.match(/^\[([^\]]*)\]\s*TJ$/);
+      const tjArrayMatch = trimmed.match(/^\[((?:\([^)]*\)|[^\[\]])*)\]\s*TJ$/);
       if (tjArrayMatch) {
         const concatenated = this.extractTJText(tjArrayMatch[1]);
         const foundKey = this.findPlaceholder(concatenated);
         if (foundKey) {
+          const suffix = concatenated.substring(concatenated.indexOf(foundKey) + foundKey.length);
           positions.push({
             key: foundKey,
             pageIndex,
@@ -390,6 +412,7 @@ export class PdfService {
             fontSize: tmA || tmD,
             fontKey: currentFontKey,
             color: { ...fillColor } as PlaceholderPosition['color'],
+            suffix,
           });
           output.push('() Tj');
           continue;
@@ -401,6 +424,7 @@ export class PdfService {
       if (tjMatch) {
         const foundKey = this.findPlaceholder(tjMatch[1]);
         if (foundKey) {
+          const suffix = tjMatch[1].substring(tjMatch[1].indexOf(foundKey) + foundKey.length);
           positions.push({
             key: foundKey,
             pageIndex,
@@ -409,6 +433,7 @@ export class PdfService {
             fontSize: tmA || tmD,
             fontKey: currentFontKey,
             color: { ...fillColor } as PlaceholderPosition['color'],
+            suffix,
           });
           output.push('() Tj');
           continue;
@@ -421,9 +446,100 @@ export class PdfService {
     return output.join('\n');
   }
 
+  /**
+   * Blank ALL TJ/Tj operators in the BT...ET block containing inline placeholders
+   * on page 7. This prevents subset-font template text from overlapping with drawText.
+   */
+  private blankInlinePlaceholders(stream: string): string {
+    if (!stream.includes('Businesses lik')) return stream;
+
+    const lines = stream.split('\n');
+    const output: string[] = [];
+
+    // Find which BT block contains the inline sentence
+    let targetBlockStart = -1;
+    let lastBt = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].trim() === 'BT') lastBt = i;
+      if (lines[i].includes('Businesses lik')) { targetBlockStart = lastBt; break; }
+    }
+
+    if (targetBlockStart === -1) return stream;
+
+    let inTargetBlock = false;
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = lines[i].trim();
+
+      if (i === targetBlockStart && trimmed === 'BT') {
+        inTargetBlock = true;
+        output.push(lines[i]);
+        continue;
+      }
+
+      if (inTargetBlock && trimmed === 'ET') {
+        inTargetBlock = false;
+        output.push(lines[i]);
+        continue;
+      }
+
+      if (inTargetBlock) {
+        // Blank any TJ array or Tj operator
+        if (/\]\s*TJ$/.test(trimmed) || /\)\s*Tj$/.test(trimmed)) {
+          output.push('() Tj');
+          continue;
+        }
+      }
+
+      output.push(lines[i]);
+    }
+
+    return output.join('\n');
+  }
+
   // ---------------------------------------------------------------------------
   // Phase B helpers — drawing text
   // ---------------------------------------------------------------------------
+
+  /**
+   * Draw the page 7 inline sentence with mixed regular/bold fonts:
+   * "Businesses like [Name] typically grow fastest by"
+   * "fixing [Focus] first."
+   */
+  private drawPage7Sentence(
+    page: ReturnType<PDFDocument['getPages']>[0],
+    fonts: Record<FontKey, PDFFont>,
+    businessName: string,
+    primaryFocus: string,
+  ): void {
+    const fontSize = 16;
+    const color = cmyk(0.732, 0.672, 0.657, 0.82);
+    const regular = fonts.robotoRegular;
+    const bold = fonts.robotoBold;
+    const y1 = 565.681;
+    const y2 = 549.681;
+
+    const line1 = [
+      { text: 'Businesses like ', font: regular },
+      { text: businessName, font: bold },
+      { text: ' typically grow fastest by', font: regular },
+    ];
+
+    const line2 = [
+      { text: 'fixing ', font: regular },
+      { text: primaryFocus, font: bold },
+      { text: ' first.', font: regular },
+    ];
+
+    // Center each line on the page
+    for (const { parts, y } of [{ parts: line1, y: y1 }, { parts: line2, y: y2 }]) {
+      const totalWidth = parts.reduce((w, p) => w + p.font.widthOfTextAtSize(p.text, fontSize), 0);
+      let x = (PAGE_WIDTH / 2) - (totalWidth / 2);
+      for (const part of parts) {
+        page.drawText(part.text, { x, y, size: fontSize, font: part.font, color });
+        x += part.font.widthOfTextAtSize(part.text, fontSize);
+      }
+    }
+  }
 
   /** Word-wrap and draw multi-line text. */
   private drawMultiline(
