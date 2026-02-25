@@ -70,8 +70,8 @@ const PLACEHOLDER_CONFIG: Record<string, PlaceholderConfig> = {
   '{{Marketing_Score}}': { fontKey: 'robotoBold', centered: false, multiline: false, maxWidth: 0, lineHeight: 0 },
   '{{Tracking_Score}}': { fontKey: 'robotoBold', centered: false, multiline: false, maxWidth: 0, lineHeight: 0 },
   '{{Lowest_Pillar_Name}}': { fontKey: 'archivoExtraBold', centered: false, multiline: false, maxWidth: 0, lineHeight: 0 },
-  '{{Lowest_Pillar_Impact_Statement}}': { fontKey: 'robotoRegular', centered: false, multiline: true, maxWidth: 450, lineHeight: 1.3 },
-  '{{Segment_Description_Block}}': { fontKey: 'robotoRegular', centered: false, multiline: true, maxWidth: 400, lineHeight: 1.35 },
+  '{{Lowest_Pillar_Impact_Statement}}': { fontKey: 'robotoRegular', centered: true, multiline: true, maxWidth: 450, lineHeight: 1.3 },
+  '{{Segment_Description_Block}}': { fontKey: 'robotoRegular', centered: false, multiline: true, maxWidth: 370, lineHeight: 1.35 },
   '{{Primary_Focus_Area}}': { fontKey: 'robotoRegular', centered: false, multiline: false, maxWidth: 0, lineHeight: 0 },
 };
 
@@ -240,6 +240,11 @@ export class PdfService {
         modified = this.blankPage2Background(modified);
       }
 
+      // Page 4 (index 3): blank static heading for vertical re-centering
+      if (pageIndex === 3) {
+        modified = this.blankPage4Heading(modified);
+      }
+
       // Page 3 (index 2): blank "/ 20" fractions and existing dots
       if (pageIndex === 2) {
         modified = this.blankPage3Fractions(modified);
@@ -278,6 +283,11 @@ export class PdfService {
         continue;
       }
 
+      // Skip page 4 placeholders — handled by drawPage4Content()
+      if (pos.pageIndex === 3 && (pos.key === '{{Lowest_Pillar_Name}}' || pos.key === '{{Lowest_Pillar_Impact_Statement}}')) {
+        continue;
+      }
+
       const rawValue = replacements[pos.key];
       if (rawValue === undefined) continue;
       const value = rawValue + pos.suffix;
@@ -291,33 +301,22 @@ export class PdfService {
         ? grayscale(pos.color.gray)
         : cmyk(pos.color.c, pos.color.m, pos.color.y, pos.color.k);
 
-      // Fix 4: Auto-size pillar name on page 4 to prevent overflow
-      if (pos.key === '{{Lowest_Pillar_Name}}') {
-        const maxTextWidth = PAGE_WIDTH - 54;
-        let drawSize = pos.fontSize;
-        let textWidth = font.widthOfTextAtSize(value, drawSize);
-        if (textWidth > maxTextWidth) {
-          drawSize = drawSize * (maxTextWidth / textWidth);
-          textWidth = font.widthOfTextAtSize(value, drawSize);
-        }
-        const cx = (PAGE_WIDTH / 2) - (textWidth / 2);
-        page.drawText(value, { x: cx, y: pos.y, size: drawSize, font, color });
+      // Fix 2: Right-align score placeholders on page 3
+      if (pos.key.endsWith('_Score}}')) {
+        const textWidth = font.widthOfTextAtSize(value, pos.fontSize);
+        const x = 530 - textWidth;
+        page.drawText(value, { x, y: pos.y, size: pos.fontSize, font, color });
         continue;
       }
 
-      // Fix 6: Reposition description inside card on page 5
+      // Fix 4: Reposition description inside card on page 5
       if (pos.key === '{{Segment_Description_Block}}' && pos.pageIndex === 4) {
-        pos.x = 110;
-        pos.y = 615;
+        pos.x = 120;
+        pos.y = 580;
       }
 
       if (config.multiline) {
-        let drawX = pos.x;
-        // Fix 5: Center impact statement block on page 4
-        if (pos.key === '{{Lowest_Pillar_Impact_Statement}}') {
-          drawX = (PAGE_WIDTH - config.maxWidth) / 2;
-        }
-        this.drawMultiline(page, value, font, pos.fontSize, drawX, pos.y, color, config);
+        this.drawMultiline(page, value, font, pos.fontSize, pos.x, pos.y, color, config);
       } else if (config.centered) {
         const w = font.widthOfTextAtSize(value, pos.fontSize);
         const cx = (PAGE_WIDTH / 2) - (w / 2);
@@ -329,6 +328,14 @@ export class PdfService {
 
     // Draw page 3 dots with dynamic opacity
     this.drawPage3Dots(pages[2], data.pillarScores);
+
+    // Draw page 4 content with vertical centering
+    this.drawPage4Content(
+      pages[3],
+      fonts,
+      replacements['{{Lowest_Pillar_Name}}'],
+      replacements['{{Lowest_Pillar_Impact_Statement}}'],
+    );
 
     // Draw page 7 inline sentence with mixed fonts
     this.drawPage7Sentence(
@@ -538,11 +545,9 @@ export class PdfService {
     return output.join('\n');
   }
 
-  /** Remove blue card background XObjects (X10, X11) from page 2 stream. */
+  /** Remove blue card background XObject (X10) from page 2 stream. Keep X11 (ring). */
   private blankPage2Background(stream: string): string {
-    return stream
-      .replace(/\/X10\s+Do/g, '')
-      .replace(/\/X11\s+Do/g, '');
+    return stream.replace(/\/X10\s+Do/g, '');
   }
 
   /** Blank "/ 20" fraction text on page 3 so scores render as "15/20". */
@@ -556,6 +561,15 @@ export class PdfService {
     // Blank simple Tj operators containing "/ 20"
     result = result.replace(/\(\/ 20\)\s*Tj/g, '() Tj');
     return result;
+  }
+
+  /** Blank "Your Biggest Growth Opportunity" heading on page 4 for vertical re-centering. */
+  private blankPage4Heading(stream: string): string {
+    return stream.replace(/\[((?:\([^)]*\)|[^\[\]])*)\]\s*TJ/g, (fullMatch, arrayContent: string) => {
+      const text = this.extractTJText(arrayContent);
+      if (text.includes('Biggest Growth Opportunity')) return '() Tj';
+      return fullMatch;
+    });
   }
 
   /** Blank existing dots on page 3 (vector dot + XObject dots X19-X22). */
@@ -651,6 +665,89 @@ export class PdfService {
     if (score >= 16) return 1.0;
     if (score >= 11) return 0.75;
     return 0.5;
+  }
+
+  /**
+   * Draw page 4 content with vertical centering:
+   * "Your Biggest Growth Opportunity" heading + pillar name + impact statement.
+   */
+  private drawPage4Content(
+    page: ReturnType<PDFDocument['getPages']>[0],
+    fonts: Record<FontKey, PDFFont>,
+    pillarName: string,
+    impactStatement: string,
+  ): void {
+    const headingFont = fonts.archivoExtraBold;
+    const pillarFont = fonts.archivoExtraBold;
+    const impactFont = fonts.robotoRegular;
+
+    const headingSize = 30;
+    const headingText = 'Your Biggest Growth Opportunity';
+    const headingColor = cmyk(0, 0, 0, 0);
+
+    // Auto-size pillar name
+    const maxPillarWidth = PAGE_WIDTH - 54;
+    let pillarSize = 50;
+    if (pillarFont.widthOfTextAtSize(pillarName, pillarSize) > maxPillarWidth) {
+      pillarSize = pillarSize * (maxPillarWidth / pillarFont.widthOfTextAtSize(pillarName, pillarSize));
+    }
+    const pillarColor = cmyk(0.011, 0.17, 0.981, 0);
+
+    // Wrap impact text
+    const impactSize = 22;
+    const impactLineHeight = 1.3;
+    const impactMaxWidth = 450;
+    const impactLines = this.wrapText(impactStatement, impactFont, impactSize, impactMaxWidth);
+    const impactHeight = (impactLines.length - 1) * impactSize * impactLineHeight;
+    const impactColor = cmyk(0, 0, 0, 0);
+
+    // Calculate total content height
+    const gap1 = 20; // heading to pillar name
+    const gap2 = 25; // pillar name to impact
+    const totalHeight = headingSize + gap1 + pillarSize + gap2 + impactHeight;
+
+    // Center vertically in available area (y=60 to y=740)
+    const areaTop = 740;
+    const areaBottom = 60;
+    const startY = areaBottom + (areaTop - areaBottom + totalHeight) / 2;
+
+    // Draw heading (centered)
+    const headingY = startY;
+    const headingW = headingFont.widthOfTextAtSize(headingText, headingSize);
+    page.drawText(headingText, {
+      x: (PAGE_WIDTH / 2) - (headingW / 2),
+      y: headingY,
+      size: headingSize,
+      font: headingFont,
+      color: headingColor,
+    });
+
+    // Draw pillar name (centered, below heading)
+    const pillarY = headingY - headingSize - gap1;
+    const pillarW = pillarFont.widthOfTextAtSize(pillarName, pillarSize);
+    page.drawText(pillarName, {
+      x: (PAGE_WIDTH / 2) - (pillarW / 2),
+      y: pillarY,
+      size: pillarSize,
+      font: pillarFont,
+      color: pillarColor,
+    });
+
+    // Draw impact statement (centered text, below pillar name)
+    const impactY = pillarY - pillarSize - gap2;
+    const impactLineSpacing = impactSize * impactLineHeight;
+    for (let i = 0; i < impactLines.length; i++) {
+      const lineText = impactLines[i];
+      const lineY = impactY - i * impactLineSpacing;
+      const lineW = impactFont.widthOfTextAtSize(lineText, impactSize);
+      page.drawText(lineText, {
+        x: (PAGE_WIDTH / 2) - (lineW / 2),
+        y: lineY,
+        size: impactSize,
+        font: impactFont,
+        color: impactColor,
+      });
+    }
   }
 
   /** Add a clickable link annotation on the page 7 CTA button. */
