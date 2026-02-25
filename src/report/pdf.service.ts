@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { PDFDocument, PDFDict, PDFName, PDFFont, PDFString, PDFArray, cmyk, grayscale } from 'pdf-lib';
@@ -98,12 +98,19 @@ function baseFontToKey(name: string): FontKey | null {
 }
 
 @Injectable()
-export class PdfService {
+export class PdfService implements OnModuleInit {
   private readonly logger = new Logger(PdfService.name);
   private templateCache: Buffer | null = null;
   private fontCache: Record<string, Buffer> | null = null;
 
   constructor() {}
+
+  /** Pre-warm template and font caches at startup. */
+  async onModuleInit(): Promise<void> {
+    await this.getTemplate();
+    await this.getFontBuffers();
+    this.logger.log('PDF template and fonts pre-warmed');
+  }
 
   private async getTemplate(): Promise<Buffer> {
     if (!this.templateCache) {
@@ -137,6 +144,7 @@ export class PdfService {
    * 2. Drawing replacement text on each page using embedded full fonts
    */
   async generatePdfBuffer(data: PdfData): Promise<Buffer> {
+    const genStart = Date.now();
     const templateBytes = await this.getTemplate();
     const fontBuffers = await this.getFontBuffers();
 
@@ -164,14 +172,20 @@ export class PdfService {
     const pdfDoc = await PDFDocument.load(templateBytes);
     pdfDoc.registerFontkit(fontkit);
 
-    // Embed full fonts
+    // Embed fonts in parallel with subsetting for faster processing
+    const fontStart = Date.now();
+    const [robotoRegular, robotoBold, robotoMedium, archivoBold, archivoExtraBold] =
+      await Promise.all([
+        pdfDoc.embedFont(fontBuffers.robotoRegular, { subset: true }),
+        pdfDoc.embedFont(fontBuffers.robotoBold, { subset: true }),
+        pdfDoc.embedFont(fontBuffers.robotoMedium, { subset: true }),
+        pdfDoc.embedFont(fontBuffers.archivoBold, { subset: true }),
+        pdfDoc.embedFont(fontBuffers.archivoExtraBold, { subset: true }),
+      ]);
     const fonts: Record<FontKey, PDFFont> = {
-      robotoRegular: await pdfDoc.embedFont(fontBuffers.robotoRegular),
-      robotoBold: await pdfDoc.embedFont(fontBuffers.robotoBold),
-      robotoMedium: await pdfDoc.embedFont(fontBuffers.robotoMedium),
-      archivoBold: await pdfDoc.embedFont(fontBuffers.archivoBold),
-      archivoExtraBold: await pdfDoc.embedFont(fontBuffers.archivoExtraBold),
+      robotoRegular, robotoBold, robotoMedium, archivoBold, archivoExtraBold,
     };
+    this.logger.log(`Font embedding: ${Date.now() - fontStart}ms`);
 
     // Build content-stream-ref → page-index map
     const pages = pdfDoc.getPages();
@@ -398,6 +412,7 @@ export class PdfService {
     this.addPage7Link(pdfDoc, pages[6]);
 
     const pdfBytes = await pdfDoc.save();
+    this.logger.log(`PDF generated in ${Date.now() - genStart}ms`);
     return Buffer.from(pdfBytes);
   }
 
