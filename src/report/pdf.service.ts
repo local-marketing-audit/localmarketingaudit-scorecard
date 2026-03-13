@@ -155,7 +155,10 @@ export class PdfService implements OnModuleInit {
    */
   private async preBakeTemplate(): Promise<void> {
     const templateBytes = await this.getTemplate();
-    const pdfDoc = await PDFDocument.load(templateBytes);
+    const pdfDoc = await PDFDocument.load(templateBytes, {
+      parseSpeed: Infinity,
+      updateMetadata: false,
+    });
 
     const pages = pdfDoc.getPages();
     const refToPageIdx = new Map<string, number>();
@@ -217,7 +220,11 @@ export class PdfService implements OnModuleInit {
       }
     }
 
-    this.preBakedTemplate = await pdfDoc.save();
+    this.preBakedTemplate = await pdfDoc.save({
+      objectsPerTick: Infinity,
+      addDefaultPage: false,
+      updateFieldAppearances: false,
+    });
     this.logger.log(
       `Pre-baked template cached (${(this.preBakedTemplate.length / 1024 / 1024).toFixed(2)} MB)`,
     );
@@ -254,7 +261,10 @@ export class PdfService implements OnModuleInit {
       '{{Primary_Focus_Area}}': pillars[lowestPillar].name,
     };
 
-    const pdfDoc = await PDFDocument.load(templateBytes);
+    const pdfDoc = await PDFDocument.load(templateBytes, {
+      parseSpeed: Infinity,
+      updateMetadata: false,
+    });
 
     // Build fonts from pre-parsed fontkit objects (bypasses fontkit.create per request)
     const fontStart = Date.now();
@@ -477,7 +487,11 @@ export class PdfService implements OnModuleInit {
     // Add clickable link on page 7 button
     this.addPage7Link(pdfDoc, pages[6]);
 
-    const pdfBytes = await pdfDoc.save();
+    const pdfBytes = await pdfDoc.save({
+      objectsPerTick: Infinity,
+      addDefaultPage: false,
+      updateFieldAppearances: false,
+    });
     this.logger.log(`PDF generated in ${Date.now() - genStart}ms`);
     return Buffer.from(pdfBytes);
   }
