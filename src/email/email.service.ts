@@ -1,14 +1,21 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { Resend } from 'resend';
 
 @Injectable()
 export class EmailService {
   private readonly resend: Resend;
   private readonly logger = new Logger(EmailService.name);
+  private readonly template: string;
 
   constructor(private readonly config: ConfigService) {
     this.resend = new Resend(this.config.getOrThrow<string>('RESEND_API_KEY'));
+    this.template = readFileSync(
+      join(__dirname, 'templates', 'report-email.html'),
+      'utf-8',
+    );
   }
 
   /** HTML-escape a string to prevent injection in email templates */
@@ -28,27 +35,41 @@ export class EmailService {
     return `${local[0]}***@${domain}`;
   }
 
+  /** Build the report email HTML by replacing template variables */
+  private buildReportEmailHtml(params: {
+    fullName: string;
+    viewReportUrl: string;
+    bookSessionUrl: string;
+  }): string {
+    return this.template
+      .replace(/\{\{fullName\}\}/g, this.escapeHtml(params.fullName))
+      .replace(/\{\{viewReportUrl\}\}/g, params.viewReportUrl)
+      .replace(/\{\{bookSessionUrl\}\}/g, params.bookSessionUrl);
+  }
+
   async sendReportEmail(params: {
     toEmail: string;
     businessName: string;
+    fullName: string;
+    viewReportUrl: string;
+    bookSessionUrl: string;
     pdfBuffer: Buffer;
   }): Promise<boolean> {
-    const safeName = this.escapeHtml(params.businessName);
     // Strip newlines/control chars from subject to prevent header injection
     const safeSubject = params.businessName.replace(/[\r\n\t]/g, ' ').trim();
+
+    const html = this.buildReportEmailHtml({
+      fullName: params.fullName,
+      viewReportUrl: params.viewReportUrl,
+      bookSessionUrl: params.bookSessionUrl,
+    });
 
     try {
       await this.resend.emails.send({
         from: 'noreply@send.localmarketingaudit.com',
         to: params.toEmail,
         subject: `Your Local Marketing Dominance Scorecard — ${safeSubject}`,
-        html: `
-          <p>Hi there,</p>
-          <p>Your personalized <strong>Local Marketing Dominance Scorecard</strong> for <strong>${safeName}</strong> is attached to this email.</p>
-          <p>Review it to see where you stand across the 5 key pillars of local marketing and what to prioritize first.</p>
-          <p>Questions? Reply to this email and we'll get back to you.</p>
-          <p>— The Local Marketing Audit Team</p>
-        `,
+        html,
         attachments: [
           {
             filename: 'dominance-scorecard-report.pdf',

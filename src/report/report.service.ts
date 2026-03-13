@@ -1,4 +1,5 @@
 import { Injectable, Logger, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Report, ReportDocument } from './report.schema';
@@ -25,6 +26,7 @@ export class ReportService {
     private scoring: ScoringService,
     private encryption: EncryptionService,
     private id: IdService,
+    private config: ConfigService,
   ) {}
 
   async generate(sessionId: string): Promise<{ reportId: string; token: string }> {
@@ -138,12 +140,21 @@ export class ReportService {
     try {
       const decryptedEmail = this.encryption.decrypt(lead.email);
       const businessName = this.encryption.decrypt(lead.businessName);
+      const fullName = this.encryption.decrypt(lead.fullName);
+
+      const token = this.encryption.signToken(reportId);
+      const appUrl = this.config.get<string>('APP_URL', 'https://localmarketingaudit.com');
+      const viewReportUrl = `${appUrl}/api/report/download/${reportId}?token=${encodeURIComponent(token)}`;
+      const bookSessionUrl = this.config.get<string>('BOOKING_URL', 'https://localmarketingaudit.com/contact');
 
       await this.reportModel.findByIdAndUpdate(reportId, { emailStatus: 'pending' });
 
       const sent = await this.emailService.sendReportEmail({
         toEmail: decryptedEmail,
         businessName,
+        fullName,
+        viewReportUrl,
+        bookSessionUrl,
         pdfBuffer: pdfData,
       });
 
